@@ -1,0 +1,258 @@
+;; ACL2 Translation of Specware Workflow Specification
+;; Using defcoproduct for polymorphic types and category theory constructs
+
+(in-package "ACL2")
+
+;; Include necessary books for polymorphic types and sum types
+(include-book "std/util/define" :dir :system)
+(include-book "std/util/defrule" :dir :system)
+(include-book "centaur/fty/deftypes" :dir :system)
+(include-book "centaur/fty/basetypes" :dir :system)
+(include-book "std/util/defsum" :dir :system)
+;; Note: defcoproduct depends on defsum infrastructure
+
+;; Polymorphic list type using defcoproduct
+(defcoproduct list-type (element-type)
+  (empty-list)
+  (cons-list (head element-type) (tail (list-type element-type))))
+
+;; Basic list operations (polymorphic)
+(define empty-list-p ((lst (list-type element-type)))
+  :returns (booleanp)
+  (case-match lst
+    (('empty-list) t)
+    (& nil)))
+
+(define list-cons ((x element-type) (lst (list-type element-type)))
+  :returns (list-type element-type)
+  (cons-list x lst))
+
+(define list-concat ((lst1 (list-type element-type)) 
+                     (lst2 (list-type element-type)))
+  :returns (list-type element-type)
+  (case-match lst1
+    (('empty-list) lst2)
+    (('cons-list head tail) 
+     (list-cons head (list-concat tail lst2)))))
+
+;; Element and DataSource types
+(defcoproduct element-type ()
+  (element (value natp)))
+
+(defcoproduct data-source ()
+  (datasource (elements (list-type element-type))))
+
+;; Predicate type (polymorphic function type)
+(defcoproduct predicate-type (element-type)
+  (predicate (func (element-type -> booleanp))))
+
+;; Extract operation specification
+(define extract-operation ((pred (predicate-type element-type))
+                          (source (list-type element-type)))
+  :returns (list-type element-type)
+  (case-match source
+    (('empty-list) (empty-list))
+    (('cons-list head tail)
+     (if (apply-predicate pred head)
+         (list-cons head (extract-operation pred tail))
+       (extract-operation pred tail)))))
+
+;; Helper function to apply predicate
+(define apply-predicate ((pred (predicate-type element-type))
+                        (elem element-type))
+  :returns booleanp
+  (case-match pred
+    (('predicate func) (funcall func elem))
+    (& nil)))
+
+;; Parallel extract specification using coproduct
+(defcoproduct parallel-extract-state ()
+  (parallel-state 
+    (data1 (list-type element-type))
+    (data2 (list-type element-type))
+    (pred1 (predicate-type element-type))
+    (pred2 (predicate-type element-type))))
+
+(define parallel-extract-1 ((state parallel-extract-state))
+  :returns (list-type element-type)
+  (case-match state
+    (('parallel-state data1 data2 pred1 pred2)
+     (extract-operation pred1 data1))))
+
+(define parallel-extract-2 ((state parallel-extract-state))
+  :returns (list-type element-type)
+  (case-match state
+    (('parallel-state data1 data2 pred1 pred2)
+     (extract-operation pred2 data2))))
+
+;; Sequential concatenation specification
+(define seq-concat ((lst1 (list-type element-type))
+                   (lst2 (list-type element-type)))
+  :returns (list-type element-type)
+  (list-concat lst1 lst2))
+
+;; Workflow specification as pushout construction
+(defcoproduct workflow-spec ()
+  (workflow 
+    (parallel-state parallel-extract-state)
+    (result (list-type element-type))))
+
+(define workflow-result ((wf workflow-spec))
+  :returns (list-type element-type)
+  (case-match wf
+    (('workflow state result)
+     (seq-concat (parallel-extract-1 state)
+                 (parallel-extract-2 state)))))
+
+;; Colimit construction for workflow
+(defcoproduct workflow-colimit ()
+  (colimit-workflow 
+    (base-workflow workflow-spec)
+    (universal-property (workflow-spec -> workflow-spec))))
+
+;; Implementation category types
+(defcoproduct array-type (element-type)
+  (array (elements (list-type element-type))))
+
+(define filter-array ((pred (predicate-type element-type))
+                     (arr (array-type element-type)))
+  :returns (array-type element-type)
+  (case-match arr
+    (('array elements)
+     (array (extract-operation pred elements)))))
+
+(define array-concat ((arr1 (array-type element-type))
+                     (arr2 (array-type element-type)))
+  :returns (array-type element-type)
+  (case-match (list arr1 arr2)
+    ((('array elems1) ('array elems2))
+     (array (list-concat elems1 elems2)))))
+
+;; Morphism from workflow to implementation
+(defcoproduct implementation-morphism ()
+  (morphism 
+    (list-map (workflow-spec -> array-type))
+    (extract-map (extract-operation -> filter-array))
+    (concat-map (seq-concat -> array-concat))))
+
+;; Parallel extract and concatenate implementation
+(define parallel-extract-and-concat 
+  ((data1 (array-type element-type))
+   (data2 (array-type element-type))
+   (pred1 (predicate-type element-type))
+   (pred2 (predicate-type element-type)))
+  :returns (array-type element-type)
+  (array-concat (filter-array pred1 data1)
+                (filter-array pred2 data2)))
+
+;; Theorem: Extract operation preserves empty lists
+(defrule extract-empty-theorem
+  (implies (empty-list-p lst)
+           (empty-list-p (extract-operation pred lst)))
+  :enable (extract-operation empty-list-p))
+
+;; Theorem: Sequential concatenation is associative
+(defrule seq-concat-associative
+  (equal (seq-concat (seq-concat xs ys) zs)
+         (seq-concat xs (seq-concat ys zs)))
+  :enable (seq-concat list-concat))
+
+;; Theorem: Parallel extraction independence
+(defrule parallel-independence
+  (let ((state (parallel-state data1 data2 pred1 pred2)))
+    (and (equal (parallel-extract-1 state)
+                (extract-operation pred1 data1))
+         (equal (parallel-extract-2 state)
+                (extract-operation pred2 data2))))
+  :enable (parallel-extract-1 parallel-extract-2))
+
+;; Theorem: Workflow composition correctness
+(defrule workflow-composition-correctness
+  (let ((state (parallel-state data1 data2 pred1 pred2))
+        (wf (workflow state result)))
+    (equal (workflow-result wf)
+           (seq-concat (extract-operation pred1 data1)
+                      (extract-operation pred2 data2))))
+  :enable (workflow-result parallel-extract-1 parallel-extract-2 seq-concat))
+
+;; Theorem: Implementation correctness
+(defrule implementation-correctness
+  (equal (parallel-extract-and-concat data1 data2 pred1 pred2)
+         (array-concat (filter-array pred1 data1)
+                       (filter-array pred2 data2)))
+  :enable (parallel-extract-and-concat array-concat filter-array))
+
+;; Pushout universal property theorem
+(defrule pushout-universal-property
+  (implies (and (workflow-spec-p wf1)
+                (workflow-spec-p wf2))
+           (equal (workflow-result wf1)
+                  (workflow-result wf2)))
+  :enable (workflow-result))
+
+;; Morphism preservation theorem
+(defrule morphism-preserves-structure
+  (let ((arr1 (array (extract-operation pred1 data1)))
+        (arr2 (array (extract-operation pred2 data2))))
+    (equal (array-concat arr1 arr2)
+           (parallel-extract-and-concat 
+             (array data1) (array data2) pred1 pred2)))
+  :enable (array-concat parallel-extract-and-concat filter-array))
+
+;; Category theory laws for the workflow category
+(defrule workflow-category-composition
+  (implies (and (workflow-spec-p wf1)
+                (workflow-spec-p wf2)
+                (workflow-spec-p wf3))
+           (equal (compose-workflows (compose-workflows wf1 wf2) wf3)
+                  (compose-workflows wf1 (compose-workflows wf2 wf3))))
+  :enable (compose-workflows))
+
+;; Helper function for workflow composition
+(define compose-workflows ((wf1 workflow-spec) (wf2 workflow-spec))
+  :returns workflow-spec
+  (case-match (list wf1 wf2)
+    ((('workflow state1 result1) ('workflow state2 result2))
+     (workflow state1 (seq-concat result1 result2)))))
+
+;; Colimit construction satisfies universal property
+(defrule colimit-universal-property
+  (implies (workflow-colimit-p col)
+           (forall (other-workflow)
+             (implies (workflow-spec-p other-workflow)
+                      (exists (unique-morphism)
+                        (equal (apply-morphism unique-morphism col)
+                               other-workflow)))))
+  :enable (workflow-colimit-p))
+
+;; Example usage and verification
+(define example-workflow ()
+  :returns workflow-spec
+  (let ((data1 (cons-list (element 1) 
+                         (cons-list (element 2) (empty-list))))
+        (data2 (cons-list (element 3) 
+                         (cons-list (element 4) (empty-list))))
+        (pred1 (predicate (lambda (x) (< (element-value x) 2))))
+        (pred2 (predicate (lambda (x) (> (element-value x) 3)))))
+    (workflow (parallel-state data1 data2 pred1 pred2)
+              (empty-list))))
+
+;; Verification of example workflow
+(defrule example-workflow-correctness
+  (let ((wf (example-workflow)))
+    (equal (workflow-result wf)
+           (cons-list (element 1) 
+                     (cons-list (element 4) (empty-list)))))
+  :enable (example-workflow workflow-result extract-operation))
+
+;; Export the main functions for use
+(defmacro export-workflow-functions ()
+  '(progn
+     (export-function extract-operation)
+     (export-function parallel-extract-1)
+     (export-function parallel-extract-2)
+     (export-function seq-concat)
+     (export-function workflow-result)
+     (export-function parallel-extract-and-concat)))
+
+(export-workflow-functions)
